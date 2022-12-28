@@ -148,7 +148,7 @@ private:
  * This implementation is bit complicated, so possibly it has sense to use
  * classic list-based queues. See:
  * 1. D.Fober, Y.Orlarey, S.Letz, "Lock-Free Techniques for Concurrent
- *    Access to Shared Ojects"
+ *    Access to Shared Objects"
  * 2. M.M.Michael, M.L.Scott, "Simple, Fast and Practical Non-Blocking and
  *    Blocking Concurrent Queue Algorithms"
  * 3. E.Ladan-Mozes, N.Shavit, "An Optimistic Approach to Lock-Free FIFO Queues"
@@ -158,14 +158,14 @@ private:
  *    http://tim.klingt.org/boost_lockfree/
  *    git://tim.klingt.org/boost_lockfree.git
  * 
- * See See Intel 64 and IA-32 Architectures Software Developer's Manual,
+ * See Intel 64 and IA-32 Architectures Software Developer's Manual,
  * Volume 3, Chapter 8.2 Memory Ordering for x86 memory ordering guarantees.
  * ------------------------------------------------------------------------
  */
 static size_t __thread __thr_id;
 
 /**
- * @return continous thread IDs starting from 0 as opposed to pthread_self().
+ * @return continuous thread IDs starting from 0 as opposed to pthread_self().
  */
 inline size_t
 thr_id()
