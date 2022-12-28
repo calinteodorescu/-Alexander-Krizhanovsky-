@@ -229,7 +229,6 @@ public:
     auto GetEarliestOffsetReservedToReadFrom( void )
     {
         auto min = m_nextAvailableOffsetToReadFrom;
-
         for( size_t i = 0
              ;
              i < m_consumers
@@ -255,6 +254,8 @@ public:
          * We do not know when a consumer uses the pop()'ed pointer,
          * so we can not overwrite it and have to wait the lowest tail.
          */
+
+        ThrPos& tp = thr_pos( );
         for( bool overflown = false
              ;
              overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
@@ -272,9 +273,18 @@ public:
         }
     }
 
-    void push( T* val )
+    void ReserveWriteToOffset( void )
     {
         ThrPos& tp = thr_pos( );
+
+        // announce non-atomic the floor of Owned Offset to Write To
+        tp.m_reservedOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
+        // reserve the offset, maybe higher than the older value because meantime other threads pushed Data
+        tp.m_reservedOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
+    }
+
+    void push( T* val )
+    {
         /*
          * Request next place to push.
          *
@@ -293,11 +303,9 @@ public:
          * so we don't need a memory barrier here.
          */
 
-        // announce non-atomic the floor of Owned Offset to Write To
-        tp.m_reservedOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
-        // reserve the offset, maybe higher than the older value because meantime other threads pushed Data
-        tp.m_reservedOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
-
+        ThrPos& tp = thr_pos( );
+        
+        ReserveWriteToOffset       ( );
         LightlyWaitToReallyHaveRoom( );
 
         m_storage[ tp.m_reservedOffsetToWriteTo & Q_MASK ] = val;
@@ -308,8 +316,9 @@ public:
 
     auto GetEarliestOffsetReservedToWriteTo( void )
     {
-        auto min = m_nextAvailableOffsetToWriteTo;
+        ThrPos& tp = thr_pos( );
 
+        auto min = m_nextAvailableOffsetToWriteTo;
         for( size_t i = 0
              ;
              i < m_producers
@@ -339,6 +348,8 @@ public:
          * before producer reserved the position writes to it.
          */
 
+        ThrPos& tp = thr_pos( );
+
         for( bool nothingToRead = false;
              ;
              nothingToRead = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
@@ -356,11 +367,21 @@ public:
         }
     }
 
+    void ReserveReadFromOffset( void )
+    {
+        ThrPos& tp = thr_pos( );
+
+        // announce non-atomic the floor of Owned Offset to Read From
+        tp.m_reservedOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
+        // reserve the offset, maybe higher than the older value because meantime other threads popped Data
+        tp.m_reservedOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
+    }
+
     T* pop( void )
     {
         assert(ThrId() < std::max(m_consumers, m_producers));
 
-        ThrPos& tp = thr_p_[ThrId()];
+        ThrPos& tp = thr_pos( );
         /*
          * Request next place from which to pop.
          * See comments for push().
@@ -369,11 +390,7 @@ public:
          * so we don't need a memory barrier here.
          */
         
-        // announce non-atomic the floor of Owned Offset to Read From
-        tp.m_reservedOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
-        // reserve the offset, maybe higher than the older value because meantime other threads popped Data
-        tp.m_reservedOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
-
+        ReserveReadFromOffset             ( );
         LightlyWaitToReallyHaveStuffToRead( );
 
         // read from the reserved offset
