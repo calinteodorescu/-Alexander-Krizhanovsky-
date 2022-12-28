@@ -190,8 +190,8 @@ private:
 
     struct ThrPos 
     {
-        unsigned long m_nextAvailableOffsetToWriteTo  = 0;
-        unsigned long m_nextAvailableOffsetToReadFrom = 0;
+        unsigned long m_reservedOffsetToWriteTo  = 0;
+        unsigned long m_reservedOffsetToReadFrom = 0;
     };
 
 public:
@@ -199,9 +199,7 @@ public:
                    size_t consumers
                  )
     :   m_producers( producers ),
-        m_consumers( consumers ),
-        last_head_(0),
-        last_tail_(0)
+        m_consumers( consumers )
     {
         auto n = std::max(m_consumers, m_producers);
         thr_p_ = (ThrPos *)::memalign(getpagesize(), sizeof(ThrPos) * n);
@@ -228,16 +226,39 @@ public:
         return thr_p_[ThrId()];
     }
 
+    auto GetEarliestOffsetReservedToReadFrom( void )
+    {
+        auto min = m_nextAvailableOffsetToReadFrom;
+
+        for( size_t i = 0
+             ;
+             i < m_consumers
+             ;
+             ++i
+           ) 
+        {
+            auto tmp_t = thr_p_[ i ].m_reservedOffsetToReadFrom;
+
+            // Force compiler to use tmp_t exactly once.
+            asm volatile("" ::: "memory");
+
+            if ( tmp_t < min )
+                min = tmp_t;
+        }
+
+        return min;
+    }
+
     void push( T* val )
     {
-        ThrPos& tp = thr_pos();
+        ThrPos& tp = thr_pos( );
         /*
          * Request next place to push.
          *
          * Second assignment is atomic only for head shift, so there is
          * a time window in which thr_p_[tid].head = ULONG_MAX, and
          * head could be shifted significantly by other threads,
-         * so pop() will set last_head_ to head.
+         * so pop() will set m_theEarliestReservedSlotToWriteTo to m_nextAvailableOffsetToWriteTo.
          * After that thr_p_[tid].head is set to old head value
          * (which is stored in local CPU register) and written by @ptr.
          *
@@ -248,52 +269,77 @@ public:
          * Loads and stores are not reordered with locked instructions,
          * so we don't need a memory barrier here.
          */
-        tp.m_nextAvailableOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
-        tp.m_nextAvailableOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
+        tp.m_reservedOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
+        tp.m_reservedOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
 
         /*
          * We do not know when a consumer uses the pop()'ed pointer,
          * so we can not overwrite it and have to wait the lowest tail.
          */
-        for( bool overflown = __builtin_expect( tp.m_nextAvailableOffsetToWriteTo >= last_tail_ + Q_SIZE, 0 )
+        for( bool overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
              ;
              overflown
              ;
-             overflown = __builtin_expect( tp.m_nextAvailableOffsetToWriteTo >= last_tail_ + Q_SIZE, 0 )
+             overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
            )
         {
-            auto min = m_nextAvailableOffsetToReadFrom;
+            // Update the m_theEarliestReservedSlotToReadFrom.
+            m_theEarliestReservedSlotToReadFrom = GetEarliestOffsetReservedToReadFrom( );
 
-            // Update the last_tail_.
-            for( size_t i = 0
-                 ;
-                 i < m_consumers
-                 ;
-                 ++i
-               ) 
-            {
-                auto tmp_t = thr_p_[ i ].m_nextAvailableOffsetToReadFrom;
-
-                // Force compiler to use tmp_t exactly once.
-                asm volatile("" ::: "memory");
-
-                if ( tmp_t < min )
-                    min = tmp_t;
-            }
-
-            last_tail_ = min;
-
-            bool hasRoom = ( tp.m_nextAvailableOffsetToWriteTo < last_tail_ + Q_SIZE );
+            bool hasRoom = ( tp.m_reservedOffsetToWriteTo < m_theEarliestReservedSlotToReadFrom + Q_SIZE );
             if ( hasRoom )
                 break;
 
             _mm_pause();
         }
 
-        m_storage[ tp.m_nextAvailableOffsetToWriteTo & Q_MASK ] = val;
+        m_storage[ tp.m_reservedOffsetToWriteTo & Q_MASK ] = val;
 
         // Allow consumers eat the item.
-        tp.m_nextAvailableOffsetToWriteTo = ULONG_MAX;
+        tp.m_reservedOffsetToWriteTo = ULONG_MAX;
+    }
+
+    auto GetEarliestOffsetReservedToWriteTo( void )
+    {
+        auto min = m_nextAvailableOffsetToWriteTo;
+
+        for( size_t i = 0
+             ;
+             i < m_producers
+             ;
+             ++i
+           )
+        {
+            auto tmp_h = thr_p_[ i ].m_reservedOffsetToWriteTo;
+
+            // Force compiler to use tmp_h exactly once.
+            asm volatile("" ::: "memory");
+
+            if ( tmp_h < min )
+                min = tmp_h;
+        }
+
+        return min;
+    }
+
+    void LightlyWaitToReallyHaveStuffToDo( void )
+    {
+        for( bool nothingToDo = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
+             ;
+             nothingToDo
+             ;
+             nothingToDo = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
+           )
+        {
+            // Update the m_theEarliestReservedSlotToWriteTo.
+            m_theEarliestReservedSlotToWriteTo = GetEarliestOffsetReservedToWriteTo( );
+
+            bool hasStuffToDo = ( tp.m_reservedOffsetToReadFrom < m_theEarliestReservedSlotToWriteTo );
+            if ( hasStuffToDo )
+                break;
+
+            _mm_pause();
+        }
     }
 
     T* pop( void )
@@ -310,56 +356,25 @@ public:
          */
         
         // announce non-atomic the floor of Owned Offset
-        tp.m_nextAvailableOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
+        tp.m_reservedOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
         // reserve the offset, maybe higher than the older value because meantime other threads popped Data
-        tp.m_nextAvailableOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
+        tp.m_reservedOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
 
         /*
          * tid'th place in m_storage is reserved by the thread -
          * this place shall never be rewritten by push() and
-         * last_tail_ at push() is a guarantee.
-         * last_head_ guaranties that no consumer eats the item
+         * m_theEarliestReservedSlotToWriteTo at push() is a guarantee.
+         * m_theEarliestReservedSlotToWriteTo guaranties that no consumer eats the item
          * before producer reserved the position writes to it.
          */
-        for( bool nothingToDo = __builtin_expect( tp.m_nextAvailableOffsetToReadFrom >= last_head_, 0 )
-             ;
-             nothingToDo
-             ;
-             nothingToDo = __builtin_expect( tp.m_nextAvailableOffsetToReadFrom >= last_head_, 0 )
-           )
-        {
-            auto min = m_nextAvailableOffsetToWriteTo;
 
-            // Update the last_head_.
-            for( size_t i = 0
-                 ;
-                 i < m_producers
-                 ;
-                 ++i
-               ) 
-            {
-                auto tmp_h = thr_p_[i].m_nextAvailableOffsetToWriteTo;
+        LightlyWaitToReallyHaveStuffToDo( );
 
-                // Force compiler to use tmp_h exactly once.
-                asm volatile("" ::: "memory");
-
-                if ( tmp_h < min )
-                    min = tmp_h;
-            }
-
-            last_head_ = min;
-
-            bool hasStuffToDo = ( tp.m_nextAvailableOffsetToReadFrom < last_head_ );
-            if ( hasStuffToDo )
-                break;
-
-            _mm_pause();
-        }
-
-        T* val = m_storage[ tp.m_nextAvailableOffsetToReadFrom & Q_MASK ];
+        // read from the reserved offset
+        T* val = m_storage[ tp.m_reservedOffsetToReadFrom & Q_MASK ];
 
         // Allow producers rewrite the slot.
-        tp.m_nextAvailableOffsetToReadFrom = ULONG_MAX;
+        tp.m_reservedOffsetToReadFrom = ULONG_MAX;
 
         return val;
     }
@@ -377,9 +392,9 @@ private:
     // current m_nextAvailableOffsetToReadFrom, next to pop
     unsigned long    m_nextAvailableOffsetToReadFrom ____cacheline_aligned = 0;
     // last not-processed producer's pointer
-    unsigned long    last_head_ ____cacheline_aligned;
+    unsigned long    m_theEarliestReservedSlotToWriteTo ____cacheline_aligned = 0;
     // last not-processed consumer's pointer
-    unsigned long    last_tail_ ____cacheline_aligned;
+    unsigned long    m_theEarliestReservedSlotToReadFrom ____cacheline_aligned = 0;
     ThrPos*          thr_p_;
     T**              m_storage;
 };
