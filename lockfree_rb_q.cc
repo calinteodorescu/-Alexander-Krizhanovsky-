@@ -179,47 +179,52 @@ set_thr_id(size_t id)
     __thr_id = id;
 }
 
-template<class T,
-    decltype(thr_id) ThrId = thr_id,
-    unsigned long Q_SIZE = QUEUE_SIZE>
-class LockFreeQueue {
+template< typename           T,
+          decltype( thr_id ) ThrId = thr_id,
+          unsigned long      Q_SIZE = QUEUE_SIZE
+        >
+class LockFreeQueue 
+{
 private:
     static const unsigned long Q_MASK = Q_SIZE - 1;
 
-    struct ThrPos {
-        unsigned long head, tail;
+    struct ThrPos 
+    {
+        unsigned long m_nextAvailableOffsetToWriteTo  = 0;
+        unsigned long m_nextAvailableOffsetToReadFrom = 0;
     };
 
 public:
-    LockFreeQueue(size_t n_producers, size_t n_consumers)
-        : n_producers_(n_producers),
-        n_consumers_(n_consumers),
-        head_(0),
-        tail_(0),
+    LockFreeQueue( size_t producers, 
+                   size_t consumers
+                 )
+    :   m_producers( producers ),
+        m_consumers( consumers ),
         last_head_(0),
         last_tail_(0)
     {
-        auto n = std::max(n_consumers_, n_producers_);
+        auto n = std::max(m_consumers, m_producers);
         thr_p_ = (ThrPos *)::memalign(getpagesize(), sizeof(ThrPos) * n);
         assert(thr_p_);
         // Set per thread tail and head to ULONG_MAX.
         ::memset((void *)thr_p_, 0xFF, sizeof(ThrPos) * n);
 
-        ptr_array_ = (T **)::memalign(getpagesize(),
-                Q_SIZE * sizeof(void *));
-        assert(ptr_array_);
+        m_storage = ( T** )::memalign( getpagesize( ),
+                                       Q_SIZE * sizeof( void* )
+                                     );
+        assert( m_storage );
     }
 
     ~LockFreeQueue()
     {
-        ::free(ptr_array_);
+        ::free( m_storage );
         ::free(thr_p_);
     }
 
     ThrPos&
     thr_pos() const
     {
-        assert(ThrId() < std::max(n_consumers_, n_producers_));
+        assert(ThrId() < std::max(m_consumers, m_producers));
         return thr_p_[ThrId()];
     }
 
@@ -243,31 +248,31 @@ public:
          * Loads and stores are not reordered with locked instructions,
          * so we don't need a memory barrier here.
          */
-        tp.head = head_;
-        tp.head = __sync_fetch_and_add( & head_, 1);
+        tp.m_nextAvailableOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
+        tp.m_nextAvailableOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
 
         /*
          * We do not know when a consumer uses the pop()'ed pointer,
          * so we can not overwrite it and have to wait the lowest tail.
          */
-        for( bool overflown = __builtin_expect( tp.head >= last_tail_ + Q_SIZE, 0 )
+        for( bool overflown = __builtin_expect( tp.m_nextAvailableOffsetToWriteTo >= last_tail_ + Q_SIZE, 0 )
              ;
              overflown
              ;
-             overflown = __builtin_expect( tp.head >= last_tail_ + Q_SIZE, 0 )
+             overflown = __builtin_expect( tp.m_nextAvailableOffsetToWriteTo >= last_tail_ + Q_SIZE, 0 )
            )
         {
-            auto min = tail_;
+            auto min = m_nextAvailableOffsetToReadFrom;
 
             // Update the last_tail_.
             for( size_t i = 0
                  ;
-                 i < n_consumers_
+                 i < m_consumers
                  ;
                  ++i
                ) 
             {
-                auto tmp_t = thr_p_[ i ].tail;
+                auto tmp_t = thr_p_[ i ].m_nextAvailableOffsetToReadFrom;
 
                 // Force compiler to use tmp_t exactly once.
                 asm volatile("" ::: "memory");
@@ -278,22 +283,22 @@ public:
 
             last_tail_ = min;
 
-            bool hasRoom = ( tp.head < last_tail_ + Q_SIZE );
+            bool hasRoom = ( tp.m_nextAvailableOffsetToWriteTo < last_tail_ + Q_SIZE );
             if ( hasRoom )
                 break;
 
             _mm_pause();
         }
 
-        ptr_array_[tp.head & Q_MASK] = val;
+        m_storage[ tp.m_nextAvailableOffsetToWriteTo & Q_MASK ] = val;
 
         // Allow consumers eat the item.
-        tp.head = ULONG_MAX;
+        tp.m_nextAvailableOffsetToWriteTo = ULONG_MAX;
     }
 
     T* pop( void )
     {
-        assert(ThrId() < std::max(n_consumers_, n_producers_));
+        assert(ThrId() < std::max(m_consumers, m_producers));
 
         ThrPos& tp = thr_p_[ThrId()];
         /*
@@ -303,34 +308,37 @@ public:
          * Loads and stores are not reordered with locked instructions,
          * so we don't need a memory barrier here.
          */
-        tp.tail = tail_;
-        tp.tail = __sync_fetch_and_add( & tail_, 1);
+        
+        // announce non-atomic the floor of Owned Offset
+        tp.m_nextAvailableOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
+        // reserve the offset, maybe higher than the older value because meantime other threads popped Data
+        tp.m_nextAvailableOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
 
         /*
-         * tid'th place in ptr_array_ is reserved by the thread -
+         * tid'th place in m_storage is reserved by the thread -
          * this place shall never be rewritten by push() and
          * last_tail_ at push() is a guarantee.
-         * last_head_ guaranties that no any consumer eats the item
+         * last_head_ guaranties that no consumer eats the item
          * before producer reserved the position writes to it.
          */
-        for( bool nothingToDo = __builtin_expect( tp.tail >= last_head_, 0 )
+        for( bool nothingToDo = __builtin_expect( tp.m_nextAvailableOffsetToReadFrom >= last_head_, 0 )
              ;
              nothingToDo
              ;
-             nothingToDo = __builtin_expect( tp.tail >= last_head_, 0 )
+             nothingToDo = __builtin_expect( tp.m_nextAvailableOffsetToReadFrom >= last_head_, 0 )
            )
         {
-            auto min = head_;
+            auto min = m_nextAvailableOffsetToWriteTo;
 
             // Update the last_head_.
             for( size_t i = 0
                  ;
-                 i < n_producers_
+                 i < m_producers
                  ;
                  ++i
                ) 
             {
-                auto tmp_h = thr_p_[i].head;
+                auto tmp_h = thr_p_[i].m_nextAvailableOffsetToWriteTo;
 
                 // Force compiler to use tmp_h exactly once.
                 asm volatile("" ::: "memory");
@@ -341,17 +349,17 @@ public:
 
             last_head_ = min;
 
-            bool hasStuffToDo = ( tp.tail < last_head_ );
+            bool hasStuffToDo = ( tp.m_nextAvailableOffsetToReadFrom < last_head_ );
             if ( hasStuffToDo )
                 break;
 
             _mm_pause();
         }
 
-        T* val = ptr_array_[tp.tail & Q_MASK];
+        T* val = m_storage[ tp.m_nextAvailableOffsetToReadFrom & Q_MASK ];
 
         // Allow producers rewrite the slot.
-        tp.tail = ULONG_MAX;
+        tp.m_nextAvailableOffsetToReadFrom = ULONG_MAX;
 
         return val;
     }
@@ -362,17 +370,18 @@ private:
      * False Sharing.
      */
 
-    const size_t n_producers_, n_consumers_;
+    const size_t     m_producers;
+    const size_t     m_consumers;
     // currently free position (next to insert)
-    unsigned long    head_ ____cacheline_aligned;
-    // current tail, next to pop
-    unsigned long    tail_ ____cacheline_aligned;
+    unsigned long    m_nextAvailableOffsetToWriteTo ____cacheline_aligned = 0;
+    // current m_nextAvailableOffsetToReadFrom, next to pop
+    unsigned long    m_nextAvailableOffsetToReadFrom ____cacheline_aligned = 0;
     // last not-processed producer's pointer
     unsigned long    last_head_ ____cacheline_aligned;
     // last not-processed consumer's pointer
     unsigned long    last_tail_ ____cacheline_aligned;
-    ThrPos        *thr_p_;
-    T        **ptr_array_;
+    ThrPos*          thr_p_;
+    T**              m_storage;
 };
 
 
