@@ -249,6 +249,29 @@ public:
         return min;
     }
 
+    void LightlyWaitToReallyHaveRoom( void )
+    {
+        /*
+         * We do not know when a consumer uses the pop()'ed pointer,
+         * so we can not overwrite it and have to wait the lowest tail.
+         */
+        for( bool overflown = false
+             ;
+             overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
+             ;
+           )
+        {
+            // Update the m_theEarliestReservedSlotToReadFrom
+            m_theEarliestReservedSlotToReadFrom = GetEarliestOffsetReservedToReadFrom( );
+
+            bool hasRoom = ( tp.m_reservedOffsetToWriteTo < m_theEarliestReservedSlotToReadFrom + Q_SIZE );
+            if ( hasRoom )
+                break;
+
+            _mm_pause();
+        }
+    }
+
     void push( T* val )
     {
         ThrPos& tp = thr_pos( );
@@ -269,33 +292,17 @@ public:
          * Loads and stores are not reordered with locked instructions,
          * so we don't need a memory barrier here.
          */
+
+        // announce non-atomic the floor of Owned Offset to Write To
         tp.m_reservedOffsetToWriteTo = m_nextAvailableOffsetToWriteTo;
+        // reserve the offset, maybe higher than the older value because meantime other threads pushed Data
         tp.m_reservedOffsetToWriteTo = __sync_fetch_and_add( & m_nextAvailableOffsetToWriteTo, 1 );
 
-        /*
-         * We do not know when a consumer uses the pop()'ed pointer,
-         * so we can not overwrite it and have to wait the lowest tail.
-         */
-        for( bool overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
-             ;
-             overflown
-             ;
-             overflown = __builtin_expect( tp.m_reservedOffsetToWriteTo >= m_theEarliestReservedSlotToReadFrom + Q_SIZE, 0 )
-           )
-        {
-            // Update the m_theEarliestReservedSlotToReadFrom.
-            m_theEarliestReservedSlotToReadFrom = GetEarliestOffsetReservedToReadFrom( );
-
-            bool hasRoom = ( tp.m_reservedOffsetToWriteTo < m_theEarliestReservedSlotToReadFrom + Q_SIZE );
-            if ( hasRoom )
-                break;
-
-            _mm_pause();
-        }
+        LightlyWaitToReallyHaveRoom( );
 
         m_storage[ tp.m_reservedOffsetToWriteTo & Q_MASK ] = val;
 
-        // Allow consumers eat the item.
+        // Allow consumers to eat the item.
         tp.m_reservedOffsetToWriteTo = ULONG_MAX;
     }
 
@@ -324,11 +331,18 @@ public:
 
     void LightlyWaitToReallyHaveStuffToDo( void )
     {
-        for( bool nothingToDo = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
-             ;
-             nothingToDo
+        /*
+         * tid'th place in m_storage is reserved by the thread -
+         * this place shall never be rewritten by push() and
+         * m_theEarliestReservedSlotToWriteTo at push() is a guarantee.
+         * m_theEarliestReservedSlotToWriteTo guaranties that no consumer eats the item
+         * before producer reserved the position writes to it.
+         */
+
+        for( bool nothingToDo = false;
              ;
              nothingToDo = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
+             ;
            )
         {
             // Update the m_theEarliestReservedSlotToWriteTo.
@@ -355,18 +369,10 @@ public:
          * so we don't need a memory barrier here.
          */
         
-        // announce non-atomic the floor of Owned Offset
+        // announce non-atomic the floor of Owned Offset to Read From
         tp.m_reservedOffsetToReadFrom = m_nextAvailableOffsetToReadFrom;
         // reserve the offset, maybe higher than the older value because meantime other threads popped Data
         tp.m_reservedOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
-
-        /*
-         * tid'th place in m_storage is reserved by the thread -
-         * this place shall never be rewritten by push() and
-         * m_theEarliestReservedSlotToWriteTo at push() is a guarantee.
-         * m_theEarliestReservedSlotToWriteTo guaranties that no consumer eats the item
-         * before producer reserved the position writes to it.
-         */
 
         LightlyWaitToReallyHaveStuffToDo( );
 
