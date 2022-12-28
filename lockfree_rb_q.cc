@@ -329,7 +329,7 @@ public:
         return min;
     }
 
-    void LightlyWaitToReallyHaveStuffToDo( void )
+    void LightlyWaitToReallyHaveStuffToRead( void )
     {
         /*
          * tid'th place in m_storage is reserved by the thread -
@@ -339,17 +339,17 @@ public:
          * before producer reserved the position writes to it.
          */
 
-        for( bool nothingToDo = false;
+        for( bool nothingToRead = false;
              ;
-             nothingToDo = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
+             nothingToRead = __builtin_expect( tp.m_reservedOffsetToReadFrom >= m_theEarliestReservedSlotToWriteTo, 0 )
              ;
            )
         {
             // Update the m_theEarliestReservedSlotToWriteTo.
             m_theEarliestReservedSlotToWriteTo = GetEarliestOffsetReservedToWriteTo( );
 
-            bool hasStuffToDo = ( tp.m_reservedOffsetToReadFrom < m_theEarliestReservedSlotToWriteTo );
-            if ( hasStuffToDo )
+            bool hasStuffToRead = ( tp.m_reservedOffsetToReadFrom < m_theEarliestReservedSlotToWriteTo );
+            if ( hasStuffToRead )
                 break;
 
             _mm_pause();
@@ -374,7 +374,7 @@ public:
         // reserve the offset, maybe higher than the older value because meantime other threads popped Data
         tp.m_reservedOffsetToReadFrom = __sync_fetch_and_add( & m_nextAvailableOffsetToReadFrom, 1);
 
-        LightlyWaitToReallyHaveStuffToDo( );
+        LightlyWaitToReallyHaveStuffToRead( );
 
         // read from the reserved offset
         T* val = m_storage[ tp.m_reservedOffsetToReadFrom & Q_MASK ];
