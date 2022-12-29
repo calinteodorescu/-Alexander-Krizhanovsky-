@@ -411,11 +411,11 @@ private:
     const size_t     m_producers;
     const size_t     m_consumers;
     // currently free position (next to insert)
-    unsigned long    m_nextAvailableOffsetToWriteTo ____cacheline_aligned = 0;
+    unsigned long    m_nextAvailableOffsetToWriteTo      ____cacheline_aligned = 0;
     // current m_nextAvailableOffsetToReadFrom, next to pop
-    unsigned long    m_nextAvailableOffsetToReadFrom ____cacheline_aligned = 0;
+    unsigned long    m_nextAvailableOffsetToReadFrom     ____cacheline_aligned = 0;
     // last not-processed producer's pointer
-    unsigned long    m_theEarliestReservedSlotToWriteTo ____cacheline_aligned = 0;
+    unsigned long    m_theEarliestReservedSlotToWriteTo  ____cacheline_aligned = 0;
     // last not-processed consumer's pointer
     unsigned long    m_theEarliestReservedSlotToReadFrom ____cacheline_aligned = 0;
     ThrPos*          thr_p_;
@@ -428,7 +428,7 @@ private:
  *    Tests for naive and lock-free queues
  * ------------------------------------------------------------------------
  */
-static const auto N = QUEUE_SIZE * 1024;
+static const auto N         = QUEUE_SIZE * 1024;
 static const auto CONSUMERS = 2;
 static const auto PRODUCERS = 2;
 
