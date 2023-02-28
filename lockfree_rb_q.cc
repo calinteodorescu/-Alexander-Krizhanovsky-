@@ -489,7 +489,7 @@ struct Consumer : public Worker<Q> {
 static inline unsigned long
 tv_to_ms(const struct timeval &tv)
 {
-    return ((unsigned long)tv.tv_sec * 1000000 + tv.tv_usec) / 1000;
+    return ((unsigned long)tv.tv_sec * 1'000'000 + tv.tv_usec) / 1'000;
 }
 
 template<class Q>
@@ -508,7 +508,7 @@ run_test(Q &&q)
     for (auto i = 0; i < PRODUCERS; ++i)
         thr[i] = std::thread(Producer<Q>(&q, i));
 
-    ::usleep(10 * 1000); // sleep to wait the queue is full
+    ::usleep(10 * 1'000); // sleep to wait the queue is full
 
     /*
      * Run consumers.
